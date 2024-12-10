@@ -66,7 +66,7 @@ class AdvancedMLPipeline:
         # 描述统计
         desc_stats = self.X.describe()
         
-        # 正态性检验 (Shapiro-Wilk)
+        # 正态性检验 (Shapiro-Wilk)，可以看这篇文章：https://blog.csdn.net/lvsehaiyang1993/article/details/80473265
         normality_tests = {}
         for column in tqdm(self.X.columns, desc="Normality Tests"):
             _, p_value = stats.shapiro(self.X[column])
@@ -213,78 +213,48 @@ class AdvancedMLPipeline:
         
         return performance_metrics
     
-    def calculate_model_contributions(self, X_train, X_test, y_train, y_test):
+    def ablation_study(self, X_train, X_test, y_train, y_test):
         """
-        计算每个基模型的贡献
+        进行消融实验，逐个移除基础模型并重新训练和评估模型
         
         参数:
             X_train, X_test: 训练和测试特征矩阵
             y_train, y_test: 训练和测试标签
-        
-        返回:
-            dict: 每个基模型的贡献
-        """
-        model = self.create_stacked_model()
-        
-        # 使用 tqdm 包装 model.fit
-        with tqdm(total=1, desc="Training Model") as pbar:
-            model.fit(X_train, y_train)
-            pbar.update(1)
-        
-        # 获取每个基模型的预测结果
-        base_predictions = {}
-        for name, estimator in model.named_estimators_:
-            base_predictions[name] = estimator.predict_proba(X_test)[:, 1]
-        
-        # 计算每个基模型的贡献
-        contributions = {}
-        for name, pred in base_predictions.items():
-            contributions[name] = roc_auc_score(y_test, pred)
-        
-        return contributions
-    
-    def ablation_study(self, X_train, X_test, y_train, y_test, model_names):
-        """
-        进行消融实验
-        
-        参数:
-            X_train, X_test: 训练和测试特征矩阵
-            y_train, y_test: 训练和测试标签
-            model_names (list): 需要移除的基模型名称列表
         
         返回:
             dict: 消融实验结果
         """
+        base_models = [
+            ('rf', RandomForestClassifier(n_estimators=100, random_state=42)),
+            ('svm', SVC(probability=True, kernel='rbf')),
+            ('xgb', XGBClassifier(use_label_encoder=False, eval_metric='logloss')),
+            ('lgb', lgb.LGBMClassifier(n_estimators=100, random_state=42))
+        ]
+        
         ablation_results = {}
         
-        for name in model_names:
-            base_models = [
-                ('rf', RandomForestClassifier(n_estimators=100, random_state=42)),
-                ('svm', SVC(probability=True, kernel='rbf')),
-                ('xgb', XGBClassifier(use_label_encoder=False, eval_metric='logloss')),
-                ('lgb', lgb.LGBMClassifier(n_estimators=100, random_state=42))
-            ]
+        for i, (name, _) in enumerate(base_models):
+            # 移除当前模型
+            reduced_models = base_models[:i] + base_models[i+1:]
             
-            # 移除指定的基模型
-            base_models = [model for model in base_models if model[0] != name]
-            
+            # 创建新的堆叠模型
             meta_classifier = LogisticRegression()
-            
             stacked_model = StackingClassifier(
-                estimators=base_models,
+                estimators=reduced_models,
                 final_estimator=meta_classifier,
                 cv=5
             )
             
-            # 使用 tqdm 包装 model.fit
-            with tqdm(total=1, desc=f"Training Model without {name}") as pbar:
+            # 训练和评估模型
+            with tqdm(total=1, desc=f"Training without {name}") as pbar:
                 stacked_model.fit(X_train, y_train)
                 pbar.update(1)
             
             y_pred = stacked_model.predict(X_test)
             y_pred_proba = stacked_model.predict_proba(X_test)[:, 1]
             
-            performance_metrics = {
+            # 计算性能指标
+            metrics = {
                 'accuracy': accuracy_score(y_test, y_pred),
                 'precision': precision_score(y_test, y_pred),
                 'recall': recall_score(y_test, y_pred),
@@ -292,7 +262,7 @@ class AdvancedMLPipeline:
                 'roc_auc': roc_auc_score(y_test, y_pred_proba)
             }
             
-            ablation_results[name] = performance_metrics
+            ablation_results[name] = metrics
         
         return ablation_results
     
@@ -307,22 +277,20 @@ class AdvancedMLPipeline:
         print("Conducting Preliminary Data Analysis...")
         prelim_analysis = self.preliminary_analysis()
         
+
         print("Preprocessing Data...")
         X_train, X_test, y_train, y_test, feature_selector = self.preprocess_data()
         
+
         print("Training and Evaluating Model...")
         model_performance = self.train_and_evaluate(X_train, X_test, y_train, y_test)
         
-        print("Calculating Model Contributions...")
-        model_contributions = self.calculate_model_contributions(X_train, X_test, y_train, y_test)
-        
         print("Running Ablation Study...")
-        ablation_results = self.ablation_study(X_train, X_test, y_train, y_test, ['rf', 'svm', 'xgb', 'lgb'])
+        ablation_results = self.ablation_study(X_train, X_test, y_train, y_test)
         
         final_results = {
             'preliminary_analysis': prelim_analysis,
             'model_performance': model_performance,
-            'model_contributions': model_contributions,
             'ablation_results': ablation_results
         }
         
@@ -342,12 +310,8 @@ if __name__ == '__main__':
     for metric, value in results['model_performance'].items():
         print(f"{metric}: {value}")
     
-    print("\n===== Model Contributions =====")
-    for model, contribution in results['model_contributions'].items():
-        print(f"{model}: {contribution:.4f}")
-    
     print("\n===== Ablation Study Results =====")
     for model, metrics in results['ablation_results'].items():
         print(f"Without {model}:")
         for metric, value in metrics.items():
-            print(f"  {metric}: {value:.4f}")
+            print(f"  {metric}: {value}")
